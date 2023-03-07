@@ -1,3 +1,4 @@
+import { createClient } from "@supabase/supabase-js";
 import { Configuration, OpenAIApi } from "openai";
 import { z } from "zod";
 import { createTRPCRouter, publicProcedure } from "~/server/api/trpc";
@@ -9,27 +10,17 @@ const configuration = new Configuration({
 
 const openai = new OpenAIApi(configuration);
 
-// Potential system message object:
-// const system = {
-//   whoami: "customer agent",
-//   company: "Bens",
-//   industry: "online shoe retailer",
-//   products: [
-//     {
-//       name: "red sneaker",
-//       price: 12,
-//       size: [9, 10, 11, 12],
-//       stock: { available: false, backIn: "2 weeks" },
-//     },
-//     {
-//       name: "brown oxford dress shoe",
-//       price: 5,
-//       size: [9, 10, 11, 12],
-//       stock: { available: true, backIn: 0 },
-//       sale: { available: true, discount: 50, endsIn: "2 weeks" },
-//     },
-//   ],
-// };
+const supabase = createClient(
+  "https://unngvkuphkfvdvdmymdd.supabase.co",
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVubmd2a3VwaGtmdmR2ZG15bWRkIiwicm9sZSI6ImFub24iLCJpYXQiOjE2NzgwNjkyOTMsImV4cCI6MTk5MzY0NTI5M30.knonEySLcCjjgKD1u-IicbgjNQc1rMwjIfDtc9Rnh1Y",
+  {
+    realtime: {
+      params: {
+        eventsPerSecond: 10,
+      },
+    },
+  }
+);
 
 const SYSTEM_MESSAGE = {
   role: "system",
@@ -38,24 +29,58 @@ const SYSTEM_MESSAGE = {
 } as const;
 
 export const chatRouter = createTRPCRouter({
-  getMessages: publicProcedure.query(async () => {
-    return await prisma.message.findMany();
+  getMessages: publicProcedure
+    .input(
+      z.object({
+        roomId: z.string(),
+      })
+    )
+    .query(async ({ input }) => {
+      return await prisma.message.findMany({ where: { roomId: input.roomId } });
+    }),
+  getRooms: publicProcedure.query(async () => {
+    return await prisma.room.findMany();
   }),
   sendMessage: publicProcedure
-    .input(z.object({ text: z.string() }))
+    .input(
+      z.object({
+        content: z.string(),
+        user: z.string(),
+        room: z.string(),
+        role: z.string(),
+      })
+    )
     .mutation(async ({ input }) => {
-      await prisma.message.create({
-        data: {
-          text: input.text,
-          role: "user",
+      const room = await prisma.room.upsert({
+        where: {
+          name: input.room,
+        },
+        update: {},
+        create: {
+          name: input.room,
         },
       });
 
-      const messages = await prisma.message.findMany();
+      const message = await prisma.message.create({
+        data: {
+          user: input.user,
+          roomId: room.id,
+          content: input.content,
+          role: input.role,
+        },
+      });
 
+      const channel = supabase.channel(`chat:${room.name}`).subscribe();
+      await channel.send({
+        type: "broadcast",
+        event: "message",
+        payload: message,
+      });
+
+      const messages = await prisma.message.findMany();
       const chatHistory = messages.map((message) => ({
         role: message.role as "user" | "assistant",
-        content: message.text,
+        content: message.content,
       }));
 
       const completion = await openai.createChatCompletion({
@@ -69,11 +94,10 @@ export const chatRouter = createTRPCRouter({
         throw new Error("No message from AI");
       }
 
-      await prisma.message.create({
-        data: {
-          text: aiMessage.content,
-          role: aiMessage.role,
-        },
+      await channel.send({
+        type: "broadcast",
+        event: "ai-message",
+        payload: aiMessage,
       });
 
       return true;

@@ -1,19 +1,60 @@
 /* eslint-disable @next/next/no-img-element */
+import { type Message } from "@prisma/client";
+import { createClient } from "@supabase/supabase-js";
 import md5 from "md5";
 import Head from "next/head";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+import { v4 } from "uuid";
 import { api } from "~/utils/api";
+
+const supabase = createClient(
+  "https://unngvkuphkfvdvdmymdd.supabase.co",
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVubmd2a3VwaGtmdmR2ZG15bWRkIiwicm9sZSI6ImFub24iLCJpYXQiOjE2NzgwNjkyOTMsImV4cCI6MTk5MzY0NTI5M30.knonEySLcCjjgKD1u-IicbgjNQc1rMwjIfDtc9Rnh1Y",
+  {
+    realtime: {
+      params: {
+        eventsPerSecond: 10,
+      },
+    },
+  }
+);
+
+const useChannel = (name: string, onMessage: (message: Message) => void) => {
+  const channel = supabase.channel(name);
+
+  channel.on("broadcast", { event: "message" }, (payload) => {
+    const message = payload.payload as Message;
+    onMessage(message);
+  });
+
+  channel.subscribe();
+
+  return {
+    sendMessage: (message: Message) => {
+      return channel.send({
+        type: "broadcast",
+        event: "message",
+        payload: message,
+      });
+    },
+  };
+};
 
 export default function Home() {
   const ref = useRef<HTMLDivElement>(null);
-  const messages = api.chat.getMessages.useQuery();
+  const [user] = useState<string>(v4());
+  const [messages, setMessages] = useState<Message[]>([]);
   const sendMessage = api.chat.sendMessage.useMutation();
+
+  useChannel(`chat:${user}`, (message) => {
+    setMessages((messages) => [...messages, message]);
+  });
 
   useEffect(() => {
     if (ref.current) {
       ref.current.scrollTop = ref.current.scrollHeight;
     }
-  }, [messages.data?.length]);
+  }, [messages]);
 
   const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -23,14 +64,12 @@ export default function Home() {
     if (!message) return;
     e.currentTarget.reset();
 
-    sendMessage.mutate(
-      { text: message as string },
-      {
-        onSettled: () => {
-          void messages.refetch();
-        },
-      }
-    );
+    sendMessage.mutate({
+      user,
+      content: message as string,
+      room: user,
+      role: "user",
+    });
   };
 
   return (
@@ -48,32 +87,32 @@ export default function Home() {
 
         <div className="flex h-[500px] w-[300px] flex-col border ">
           <div ref={ref} className="flex-1 overflow-y-auto">
-            {messages.data?.map((message) => (
+            {messages.map((message) => (
               <div
                 key={message.id}
                 className="flex flex-row gap-3 border-b p-2"
               >
-                {message.role === "user" ? (
+                {message.user === user ? (
                   <div className="flex w-full flex-shrink-0 flex-row items-center gap-4">
                     <img
                       className="h-10 w-10 rounded-full border"
                       src={`https://www.gravatar.com/avatar/${md5(
-                        "user"
+                        message.user
                       )}?d=robohash&f=y`}
                       alt="avatar"
                     />
-                    <p className="text-center text-xs">{message.text}</p>
+                    <p className="text-center text-xs">{message.content}</p>
                   </div>
                 ) : (
                   <div className="flex w-full flex-shrink-0 flex-row-reverse items-center justify-start gap-4">
                     <img
                       className="h-10 w-10 rounded-full border"
                       src={`https://www.gravatar.com/avatar/${md5(
-                        "ai"
+                        message.user
                       )}?d=robohash&f=y`}
                       alt="avatar"
                     />
-                    <p className="text-center text-xs">{message.text}</p>
+                    <p className="text-center text-xs">{message.content}</p>
                   </div>
                 )}
               </div>
